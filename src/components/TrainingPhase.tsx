@@ -1,249 +1,229 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { ChatMessage, Question, QuestionType, Word, WordProgress } from '@/types';
 import { speak, speakEnglish, stopSpeaking, startListening, isSpeechSupported } from '@/lib/voice';
 
 interface Props {
-  messages: ChatMessage[];
-  currentQuestion: Question | null;
   words: Word[];
   progress: Record<string, WordProgress>;
+  messages: ChatMessage[];
+  currentQuestion: Question | null;
   masteredCount: number;
-  totalWords: number;
-  isListening: boolean;
-  isSpeaking: boolean;
-  onSubmitAnswer: (answer: string) => void;
-  onStartListening: (lang?: string) => void;
-  onStopListening: () => void;
-  onCoachSpeak: () => void;
-  onStartExam: () => void;
-  phase: string;
+  onAnswer: (answer: string) => void;
+  onSpeak: (text?: string) => void;
+  onReset: () => void;
 }
 
-const typeConfig: Record<QuestionType, { label: string; icon: string; bg: string; border: string; text: string }> = {
-  reading: { label: '阅读', icon: '📖', bg: 'bg-blue-500/10', border: 'border-blue-500/30', text: 'text-blue-400' },
-  listening: { label: '听力', icon: '🎧', bg: 'bg-purple-500/10', border: 'border-purple-500/30', text: 'text-purple-400' },
-  writing: { label: '写作', icon: '✍️', bg: 'bg-amber-500/10', border: 'border-amber-500/30', text: 'text-amber-400' },
-  speaking: { label: '口语', icon: '🗣️', bg: 'bg-emerald-500/10', border: 'border-emerald-500/30', text: 'text-emerald-400' },
+const DIM_LABELS: Record<QuestionType, { label: string; icon: string; color: string }> = {
+  reading: { label: '阅读', icon: '\u{1F4D6}', color: 'from-blue-500 to-cyan-500' },
+  listening: { label: '听力', icon: '\u{1F3A7}', color: 'from-purple-500 to-pink-500' },
+  writing: { label: '写作', icon: '\u270D\uFE0F', color: 'from-emerald-500 to-teal-500' },
+  speaking: { label: '口语', icon: '\u{1F3C4}', color: 'from-amber-500 to-orange-500' },
 };
 
 export default function TrainingPhase({
-  messages, currentQuestion, words, progress, masteredCount, totalWords,
-  isListening, isSpeaking, onSubmitAnswer, onStartListening, onStopListening, onCoachSpeak,
-  onStartExam, phase,
+  words, progress, messages, currentQuestion, masteredCount, onAnswer, onSpeak, onReset
 }: Props) {
-  const [textInput, setTextInput] = useState('');
-  const [autoSpeak, setAutoSpeak] = useState(true);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const chatContainerRef = useRef<HTMLDivElement>(null);
-  const lastSpokenIdRef = useRef<string>('');
+  const [input, setInput] = useState('');
+  const [isListening, setIsListening] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const chatRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listenerRef = useRef<{ stop: () => void } | null>(null);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (chatRef.current) {
+      chatRef.current.scrollTop = chatRef.current.scrollHeight;
+    }
   }, [messages]);
 
-  // Auto-speak new coach messages
   useEffect(() => {
-    if (!autoSpeak) return;
-    const lastMsg = messages[messages.length - 1];
-    if (lastMsg && lastMsg.role === 'coach' && lastMsg.id !== lastSpokenIdRef.current) {
-      lastSpokenIdRef.current = lastMsg.id;
-      const cleanText = lastMsg.content.replace(/\*\*/g, '').replace(/---/g, '').replace(/\n/g, '。');
-      speak(cleanText, 1.1).catch(() => {});
-      // If listening question, also play the word audio
-      if (lastMsg.question?.audioNeeded) {
-        const word = words.find(w => w.id === lastMsg.question!.wordId);
-        if (word) {
-          setTimeout(() => speakEnglish(word.word, 0.7).catch(() => {}), 500);
-        }
+    if (currentQuestion?.audioNeeded && messages.length > 0) {
+      const word = words.find(w => w.id === currentQuestion.wordId);
+      if (word) {
+        const timer = setTimeout(() => {
+          speakEnglish(word.word, 0.8).catch(console.error);
+        }, 600);
+        return () => clearTimeout(timer);
       }
     }
-  }, [messages, autoSpeak, words]);
+  }, [currentQuestion?.id, currentQuestion?.audioNeeded, messages.length, words]);
 
-  const handleSubmit = useCallback(() => {
-    if (!textInput.trim()) return;
-    onSubmitAnswer(textInput.trim());
-    setTextInput('');
-  }, [textInput, onSubmitAnswer]);
-
-  const handleVoiceInput = useCallback(() => {
-    if (isListening) {
-      onStopListening();
-    } else {
-      const lang = currentQuestion?.type === 'writing' || currentQuestion?.type === 'listening' ? 'en-US' : 'zh-CN';
-      onStartListening(lang);
+  useEffect(() => {
+    const lastMsg = messages[messages.length - 1];
+    if (lastMsg?.role === 'coach' && messages.length > 1) {
+      const clean = lastMsg.content.replace(/\*\*/g, '').replace(/---/g, '').replace(/\n/g, '。');
+      setIsSpeaking(true);
+      speak(clean, 1.1).finally(() => setIsSpeaking(false));
     }
-  }, [isListening, currentQuestion, onStartListening, onStopListening]);
+  }, [messages.length]);
 
-  const playWordAudio = useCallback(async () => {
+  const handleSubmit = () => {
+    if (!input.trim()) return;
+    onAnswer(input.trim());
+    setInput('');
+  };
+
+  const handleVoiceInput = () => {
+    if (isListening) {
+      listenerRef.current?.stop();
+      setIsListening(false);
+      return;
+    }
+    stopSpeaking();
+    setIsListening(true);
+    const lang = currentQuestion?.type === 'speaking' ? 'en-US' : 'zh-CN';
+    listenerRef.current = startListening(
+      (result) => {
+        setIsListening(false);
+        listenerRef.current = null;
+        if (result.transcript) {
+          onAnswer(result.transcript);
+        }
+      },
+      (error) => {
+        setIsListening(false);
+        listenerRef.current = null;
+        console.error(error);
+      },
+      lang
+    );
+  };
+
+  const handleReplay = async () => {
     if (!currentQuestion) return;
     const word = words.find(w => w.id === currentQuestion.wordId);
     if (word) {
-      await speakEnglish(word.word, 0.7);
+      setIsSpeaking(true);
+      try {
+        await speakEnglish(word.word, 0.8);
+      } catch (e) { console.error(e); }
+      setIsSpeaking(false);
     }
-  }, [currentQuestion, words]);
+  };
 
-  const progressPercent = totalWords > 0 ? Math.round((masteredCount / totalWords) * 100) : 0;
-  const allMastered = masteredCount === totalWords && totalWords > 0;
-  const qInfo = currentQuestion ? typeConfig[currentQuestion.type] : null;
-
-  // Get current word for display
-  const currentWord = currentQuestion ? words.find(w => w.id === currentQuestion.wordId) : null;
+  const total = words.length;
+  const pct = total > 0 ? Math.round((masteredCount / total) * 100) : 0;
+  const dimInfo = currentQuestion ? DIM_LABELS[currentQuestion.type] : null;
 
   return (
-    <div className="flex flex-col h-screen bg-gray-900">
-      {/* Header Bar */}
-      <div className="bg-gray-800/90 backdrop-blur-sm border-b border-gray-700/50 px-4 py-3 flex items-center gap-4 shrink-0">
-        <div className="flex-1">
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="text-white font-bold text-sm">{masteredCount} / {totalWords} 已掌握</span>
-            <span className="text-gray-400 text-xs">{progressPercent}%</span>
+    <div className="flex flex-col h-screen bg-zinc-950">
+      {/* Top Bar */}
+      <div className="flex-shrink-0 border-b border-zinc-800/50 bg-zinc-900/80 backdrop-blur-sm">
+        <div className="max-w-2xl mx-auto px-4 py-3">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-3">
+              <button onClick={onReset} className="p-1.5 rounded-lg hover:bg-zinc-800 text-zinc-500 hover:text-zinc-300 transition-colors">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
+              </button>
+              <span className="text-zinc-300 font-semibold text-sm">单词精通教练</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-amber-400 font-bold text-lg">{masteredCount}</span>
+              <span className="text-zinc-500">/</span>
+              <span className="text-zinc-400">{total}</span>
+              <span className="text-zinc-600 text-sm ml-1">({pct}%)</span>
+            </div>
           </div>
-          <div className="w-full bg-gray-700 rounded-full h-2 overflow-hidden">
+          <div className="h-1.5 bg-zinc-800 rounded-full overflow-hidden">
             <div
-              className="bg-gradient-to-r from-emerald-500 to-emerald-400 h-2 rounded-full transition-all duration-700 ease-out"
-              style={{ width: `${progressPercent}%` }}
+              className="h-full bg-gradient-to-r from-amber-500 to-orange-500 rounded-full transition-all duration-500"
+              style={{ width: `${pct}%` }}
             />
           </div>
         </div>
-        {qInfo && currentQuestion && (
-          <div className={`${qInfo.bg} ${qInfo.border} border rounded-lg px-3 py-1.5 text-center`}>
-            <span className="text-sm">{qInfo.icon}</span>
-            <span className={`ml-1 text-xs font-bold ${qInfo.text}`}>{qInfo.label}</span>
-          </div>
-        )}
       </div>
 
-      {/* Current Word Display */}
-      {currentWord && currentQuestion && (
-        <div className="bg-gray-800/50 border-b border-gray-700/30 px-4 py-2 flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-2">
-            <span className="text-white font-mono text-lg font-bold">{currentWord.word}</span>
-            {currentWord.phonetic && (
-              <span className="text-gray-500 text-sm">/{currentWord.phonetic}/</span>
-            )}
-          </div>
-          {currentQuestion.audioNeeded && (
-            <button
-              onClick={playWordAudio}
-              className="bg-purple-500/20 hover:bg-purple-500/30 border border-purple-500/30 text-purple-300 px-3 py-1 rounded-lg text-sm flex items-center gap-1 transition-colors"
-            >
-              🔊 播放发音
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* Messages Area */}
-      <div ref={chatContainerRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-3 chat-scroll">
-        {messages.map((msg) => (
-          <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-fade-in`}>
-            <div className={`
-              max-w-[85%] rounded-2xl px-4 py-3 shadow-sm
-              ${msg.role === 'user'
-                ? 'bg-emerald-600 text-white rounded-br-sm'
-                : 'bg-gray-700/80 text-gray-100 rounded-bl-sm border border-gray-600/30'}
-            `}>
-              {msg.role === 'coach' && (
-                <div className="text-xs text-gray-400 mb-1 font-medium">教练</div>
-              )}
-              <div className="whitespace-pre-wrap text-sm leading-relaxed">
-                {msg.content.split('**').map((part, i) =>
-                  i % 2 === 1 ? <strong key={i} className="text-emerald-300 font-bold">{part}</strong> : part
+      {/* Chat Area */}
+      <div ref={chatRef} className="flex-1 overflow-y-auto">
+        <div className="max-w-2xl mx-auto px-4 py-6 space-y-4">
+          {messages.map((msg) => (
+            <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+              <div className={`
+                max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed
+                ${msg.role === 'user'
+                  ? 'bg-amber-600/20 border border-amber-600/30 text-amber-100'
+                  : 'bg-zinc-800/80 border border-zinc-700/50 text-zinc-200'
+                }
+              `}>
+                {msg.role === 'coach' && msg.question && (
+                  <div className="flex items-center gap-1.5 mb-2 pb-2 border-b border-zinc-700/50">
+                    <span className="text-xs">{DIM_LABELS[msg.question.type].icon}</span>
+                    <span className={`text-xs font-medium bg-gradient-to-r ${DIM_LABELS[msg.question.type].color} bg-clip-text text-transparent`}>
+                      {DIM_LABELS[msg.question.type].label}考核
+                    </span>
+                  </div>
                 )}
+                <div className="whitespace-pre-wrap">{msg.content}</div>
               </div>
             </div>
-          </div>
-        ))}
-        <div ref={messagesEndRef} />
+          ))}
+        </div>
       </div>
 
-      {/* Final Exam Button */}
-      {allMastered && phase === 'exam' && (
-        <div className="px-4 py-3 shrink-0 animate-fade-in">
-          <button
-            onClick={onStartExam}
-            className="w-full bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white font-bold py-4 rounded-xl text-lg shadow-lg shadow-amber-500/20 transition-all hover:scale-[1.02] active:scale-[0.98]"
-          >
-            🏆 所有单词已掌握！开始最终考核
-          </button>
+      {/* Current Question Badge */}
+      {currentQuestion && dimInfo && (
+        <div className="flex-shrink-0 border-t border-zinc-800/30">
+          <div className="max-w-2xl mx-auto px-4 py-2 flex items-center justify-center gap-2">
+            <div className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-gradient-to-r ${dimInfo.color} text-white text-xs font-medium`}>
+              {dimInfo.icon} {dimInfo.label}题
+            </div>
+            {currentQuestion.audioNeeded && (
+              <button
+                onClick={handleReplay}
+                className="p-1.5 rounded-full bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white transition-colors"
+                title="重新播放发音"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" /></svg>
+              </button>
+            )}
+          </div>
         </div>
       )}
 
       {/* Input Area */}
-      <div className="bg-gray-800/90 backdrop-blur-sm border-t border-gray-700/50 px-4 py-3 shrink-0">
-        <div className="flex items-center gap-3">
-          {/* Mic button - prominent */}
-          <div className="relative">
-            <button
-              onClick={handleVoiceInput}
-              className={`
-                w-14 h-14 rounded-full flex items-center justify-center text-2xl shrink-0 transition-all shadow-lg
-                ${isListening
-                  ? 'bg-red-500 text-white shadow-red-500/30 scale-110'
-                  : 'bg-gradient-to-br from-emerald-500 to-emerald-600 text-white shadow-emerald-500/20 hover:scale-105 active:scale-95'}
-              `}
-              title={isListening ? '停止录音' : '按住说话'}
-            >
-              {isListening ? '⏹' : '🎤'}
-            </button>
-            {isListening && (
-              <div className="absolute inset-0 rounded-full border-2 border-red-400 animate-pulse-ring" />
-            )}
-          </div>
-
-          {/* Text input */}
-          <div className="flex-1 flex items-center bg-gray-700/50 border border-gray-600/50 rounded-xl overflow-hidden focus-within:border-emerald-500/50 transition-colors">
-            <input
-              type="text"
-              value={textInput}
-              onChange={(e) => setTextInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleSubmit()}
-              placeholder={isListening ? '正在听...' : '输入答案或按麦克风说话...'}
-              className="flex-1 bg-transparent text-white px-4 py-3 outline-none text-sm placeholder:text-gray-500"
-              disabled={isListening}
-            />
-            {textInput && (
-              <button 
-                onClick={handleSubmit} 
-                className="bg-emerald-500 hover:bg-emerald-600 text-white px-4 py-3 text-sm font-semibold transition-colors"
+      <div className="flex-shrink-0 border-t border-zinc-800/50 bg-zinc-900/80 backdrop-blur-sm">
+        <div className="max-w-2xl mx-auto px-4 py-3">
+          <div className="flex items-center gap-2">
+            {isSpeechSupported() && (
+              <button
+                onClick={handleVoiceInput}
+                className={`
+                  relative flex-shrink-0 w-12 h-12 rounded-full flex items-center justify-center transition-all duration-300
+                  ${isListening
+                    ? 'bg-red-500 text-white shadow-lg shadow-red-500/30 scale-110'
+                    : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-white'
+                  }
+                `}
               >
-                发送 ↵
+                {isListening && (
+                  <span className="absolute inset-0 rounded-full bg-red-500 animate-ping opacity-30" />
+                )}
+                <svg className="w-5 h-5 relative" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-14 0m7 7v4m-4 0h8m-4-16a3 3 0 00-3 3v4a3 3 0 006 0V6a3 3 0 00-3-3z" />
+                </svg>
               </button>
             )}
+
+            <input
+              ref={inputRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') handleSubmit(); }}
+              placeholder={isListening ? '正在听你说话...' : '输入答案，回车提交...'}
+              className="flex-1 bg-zinc-800/80 border border-zinc-700/50 rounded-xl px-4 py-3 text-white placeholder-zinc-500 focus:outline-none focus:border-amber-500/50 focus:ring-1 focus:ring-amber-500/20 transition-all"
+              disabled={isListening}
+            />
+
+            <button
+              onClick={handleSubmit}
+              disabled={!input.trim()}
+              className="flex-shrink-0 w-12 h-12 rounded-xl bg-amber-600 hover:bg-amber-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white flex items-center justify-center transition-all disabled:cursor-not-allowed"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19V5m-7 7l7-7 7 7" /></svg>
+            </button>
           </div>
-
-          {/* Speaker button */}
-          <button
-            onClick={onCoachSpeak}
-            className={`
-              w-12 h-12 rounded-full flex items-center justify-center text-xl shrink-0 transition-all
-              ${isSpeaking 
-                ? 'bg-blue-500 text-white animate-pulse' 
-                : 'bg-gray-700 text-gray-300 hover:bg-gray-600 hover:text-white'}
-            `}
-            title="教练朗读当前题目"
-          >
-            🔊
-          </button>
-        </div>
-
-        {/* Status hints */}
-        <div className="flex items-center justify-between mt-2 px-1">
-          {!isSpeechSupported() ? (
-            <p className="text-yellow-500/80 text-xs">⚠️ 语音识别不可用，请使用 Chrome</p>
-          ) : (
-            <p className="text-gray-600 text-xs">
-              {isListening ? '🔴 录音中...' : '点击麦克风语音作答'}
-            </p>
-          )}
-          <button
-            onClick={() => setAutoSpeak(!autoSpeak)}
-            className="text-xs text-gray-600 hover:text-gray-400 transition-colors"
-          >
-            {autoSpeak ? '🔊 自动朗读' : '🔇 静音模式'}
-          </button>
         </div>
       </div>
     </div>
